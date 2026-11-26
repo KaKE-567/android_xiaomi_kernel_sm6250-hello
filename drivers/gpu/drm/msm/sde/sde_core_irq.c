@@ -44,8 +44,6 @@ static void sde_core_irq_callback_handler(void *arg, int irq_idx)
 				&sde_kms->irq_obj.enable_counts[irq_idx]);
 	}
 
-	atomic_inc(&irq_obj->irq_counts[irq_idx]);
-
 	/*
 	 * Perform registered function callback
 	 */
@@ -105,8 +103,7 @@ static int _sde_core_irq_enable(struct sde_kms *sde_kms, int irq_idx)
 	int ret = 0;
 
 	if (!sde_kms || !sde_kms->hw_intr ||
-			!sde_kms->irq_obj.enable_counts ||
-			!sde_kms->irq_obj.irq_counts) {
+			!sde_kms->irq_obj.enable_counts) {
 		SDE_ERROR("invalid params\n");
 		return -EINVAL;
 	}
@@ -402,7 +399,7 @@ static int sde_debugfs_core_irq_show(struct seq_file *s, void *v)
 	struct sde_irq *irq_obj = s->private;
 	struct sde_irq_callback *cb;
 	unsigned long irq_flags;
-	int i, irq_count, enable_count, cb_count;
+	int i, enable_count, cb_count;
 
 	if (!irq_obj || !irq_obj->enable_counts || !irq_obj->irq_cb_tbl) {
 		SDE_ERROR("invalid parameters\n");
@@ -412,15 +409,14 @@ static int sde_debugfs_core_irq_show(struct seq_file *s, void *v)
 	for (i = 0; i < irq_obj->total_irqs; i++) {
 		spin_lock_irqsave(&irq_obj->cb_lock, irq_flags);
 		cb_count = 0;
-		irq_count = atomic_read(&irq_obj->irq_counts[i]);
 		enable_count = atomic_read(&irq_obj->enable_counts[i]);
 		list_for_each_entry(cb, &irq_obj->irq_cb_tbl[i], list)
 			cb_count++;
 		spin_unlock_irqrestore(&irq_obj->cb_lock, irq_flags);
 
-		if (irq_count || enable_count || cb_count)
-			seq_printf(s, "idx:%d irq:%d enable:%d cb:%d\n",
-					i, irq_count, enable_count, cb_count);
+		if (enable_count || cb_count)
+			seq_printf(s, "idx:%d enable:%d cb:%d\n",
+					i, enable_count, cb_count);
 	}
 
 	return 0;
@@ -494,10 +490,7 @@ void sde_core_irq_preinstall(struct sde_kms *sde_kms)
 			sizeof(struct list_head), GFP_KERNEL);
 	sde_kms->irq_obj.enable_counts = kcalloc(sde_kms->irq_obj.total_irqs,
 			sizeof(atomic_t), GFP_KERNEL);
-	sde_kms->irq_obj.irq_counts = kcalloc(sde_kms->irq_obj.total_irqs,
-			sizeof(atomic_t), GFP_KERNEL);
-	if (!sde_kms->irq_obj.irq_cb_tbl || !sde_kms->irq_obj.enable_counts
-			|| !sde_kms->irq_obj.irq_counts)
+	if (!sde_kms->irq_obj.irq_cb_tbl || !sde_kms->irq_obj.enable_counts)
 		return;
 
 	for (i = 0; i < sde_kms->irq_obj.total_irqs; i++) {
@@ -505,8 +498,6 @@ void sde_core_irq_preinstall(struct sde_kms *sde_kms)
 			INIT_LIST_HEAD(&sde_kms->irq_obj.irq_cb_tbl[i]);
 		if (sde_kms->irq_obj.enable_counts)
 			atomic_set(&sde_kms->irq_obj.enable_counts[i], 0);
-		if (sde_kms->irq_obj.irq_counts)
-			atomic_set(&sde_kms->irq_obj.irq_counts[i], 0);
 	}
 }
 
@@ -554,10 +545,8 @@ void sde_core_irq_uninstall(struct sde_kms *sde_kms)
 	spin_lock_irqsave(&sde_kms->irq_obj.cb_lock, irq_flags);
 	kfree(sde_kms->irq_obj.irq_cb_tbl);
 	kfree(sde_kms->irq_obj.enable_counts);
-	kfree(sde_kms->irq_obj.irq_counts);
 	sde_kms->irq_obj.irq_cb_tbl = NULL;
 	sde_kms->irq_obj.enable_counts = NULL;
-	sde_kms->irq_obj.irq_counts = NULL;
 	sde_kms->irq_obj.total_irqs = 0;
 	spin_unlock_irqrestore(&sde_kms->irq_obj.cb_lock, irq_flags);
 }

@@ -1,4 +1,4 @@
-/* Copyright (c) 2010-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2010-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -28,7 +28,6 @@
 #include "kgsl_device.h"
 #include "kgsl_trace.h"
 #include "kgsl_gmu_core.h"
-#include "kgsl_trace_power.h"
 
 #define KGSL_PWRFLAGS_POWER_ON 0
 #define KGSL_PWRFLAGS_CLK_ON   1
@@ -492,8 +491,6 @@ void kgsl_pwrctrl_pwrlevel_change(struct kgsl_device *device,
 			pwr->active_pwrlevel, pwrlevel->gpu_freq,
 			pwr->previous_pwrlevel,
 			pwr->pwrlevels[old_level].gpu_freq);
-
-	trace_gpu_frequency(pwrlevel->gpu_freq/1000, 0);
 
 	/*
 	 * Some targets do not support the bandwidth requirement of
@@ -2198,6 +2195,14 @@ static inline void _close_ocmem_pcl(struct kgsl_pwrctrl *pwr)
 	pwr->ocmem_pcl = 0;
 }
 
+static void _close_ahbpath_pcl(struct kgsl_pwrctrl *pwr)
+{
+	if (pwr->ahbpath_pcl)
+		msm_bus_scale_unregister_client(pwr->ahbpath_pcl);
+
+	pwr->ahbpath_pcl = 0;
+}
+
 static inline void _close_regulators(struct kgsl_pwrctrl *pwr)
 {
 	int i;
@@ -2272,8 +2277,10 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 	struct platform_device *pdev = device->pdev;
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	struct device_node *ocmem_bus_node;
+	struct device_node *ahbpath_node;
 	struct msm_bus_scale_pdata *ocmem_scale_table = NULL;
 	struct msm_bus_scale_pdata *bus_scale_table;
+	struct msm_bus_scale_pdata *ahbpath_table;
 	struct device_node *gpubw_dev_node = NULL;
 	struct platform_device *p2dev;
 
@@ -2367,6 +2374,22 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		}
 	}
 
+	ahbpath_node =
+		of_find_node_by_name(device->pdev->dev.of_node,
+			"qcom,cpu-to-ahb-path");
+	if (ahbpath_node) {
+		ahbpath_table =
+			msm_bus_pdata_from_node(device->pdev, ahbpath_node);
+		if (ahbpath_table)
+			pwr->ahbpath_pcl =
+				msm_bus_scale_register_client(ahbpath_table);
+
+		if (!pwr->ahbpath_pcl) {
+			result = -EINVAL;
+			goto error_cleanup_ocmem_pcl;
+		}
+	}
+
 	/* Bus width in bytes, set it to zero if not found */
 	if (of_property_read_u32(pdev->dev.of_node, "qcom,bus-width",
 		&pwr->bus_width))
@@ -2396,7 +2419,7 @@ int kgsl_pwrctrl_init(struct kgsl_device *device)
 		pwr->pcl = msm_bus_scale_register_client(bus_scale_table);
 		if (pwr->pcl == 0) {
 			result = -EINVAL;
-			goto error_cleanup_ocmem_pcl;
+			goto error_cleanup_ahbpath_pcl;
 		}
 	}
 
@@ -2500,6 +2523,8 @@ error_cleanup_pwr_limit:
 	kfree(pwr->bus_ib);
 error_cleanup_pcl:
 	_close_pcl(pwr);
+error_cleanup_ahbpath_pcl:
+	_close_ahbpath_pcl(pwr);
 error_cleanup_ocmem_pcl:
 	_close_ocmem_pcl(pwr);
 error_disable_pm:
@@ -2531,6 +2556,8 @@ void kgsl_pwrctrl_close(struct kgsl_device *device)
 	_close_pcl(pwr);
 
 	_close_ocmem_pcl(pwr);
+
+	_close_ahbpath_pcl(pwr);
 
 	pm_runtime_disable(&device->pdev->dev);
 
@@ -2761,6 +2788,7 @@ static int _wake(struct kgsl_device *device)
 {
 	struct kgsl_pwrctrl *pwr = &device->pwrctrl;
 	int status = 0;
+	unsigned int state = device->state;
 
 	switch (device->state) {
 	case KGSL_STATE_SUSPEND:

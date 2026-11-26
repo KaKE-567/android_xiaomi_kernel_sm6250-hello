@@ -1,4 +1,4 @@
-/* Copyright (c) 2002,2007-2019, The Linux Foundation. All rights reserved.
+/* Copyright (c) 2002,2007-2020, The Linux Foundation. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License version 2 and
@@ -101,9 +101,7 @@ static struct adreno_device device_3d0 = {
 	.ft_policy = KGSL_FT_DEFAULT_POLICY,
 	.ft_pf_policy = KGSL_FT_PAGEFAULT_DEFAULT_POLICY,
 	.long_ib_detect = 1,
-	.pwrctrl_flag = BIT(ADRENO_SPTP_PC_CTRL) | BIT(ADRENO_PPD_CTRL) |
-		BIT(ADRENO_LM_CTRL) | BIT(ADRENO_HWCG_CTRL) |
-		BIT(ADRENO_THROTTLING_CTRL),
+	.pwrctrl_flag = BIT(ADRENO_HWCG_CTRL) | BIT(ADRENO_THROTTLING_CTRL),
 	.profile.enabled = false,
 	.active_list = LIST_HEAD_INIT(device_3d0.active_list),
 	.active_list_lock = __SPIN_LOCK_UNLOCKED(device_3d0.active_list_lock),
@@ -558,8 +556,6 @@ static irqreturn_t adreno_irq_handler(struct kgsl_device *device)
 
 		tmp &= ~BIT(i);
 	}
-
-	gpudev->irq_trace(adreno_dev, status);
 
 	/*
 	 * Clear ADRENO_INT_RBBM_AHB_ERROR bit after this interrupt has been
@@ -1309,9 +1305,6 @@ static int adreno_probe(struct platform_device *pdev)
 
 	kgsl_pwrscale_init(&pdev->dev, CONFIG_QCOM_ADRENO_DEFAULT_GOVERNOR);
 
-	/* Initialize coresight for the target */
-	adreno_coresight_init(adreno_dev);
-
 	/* Get the system cache slice descriptor for GPU */
 	adreno_dev->gpu_llc_slice = adreno_llc_getd(&pdev->dev, "gpu");
 	if (IS_ERR(adreno_dev->gpu_llc_slice) &&
@@ -1381,7 +1374,6 @@ static int adreno_remove(struct platform_device *pdev)
 
 	adreno_sysfs_close(adreno_dev);
 
-	adreno_coresight_remove(adreno_dev);
 	adreno_profile_close(adreno_dev);
 
 	/* Release the system cache slice descriptor */
@@ -1689,13 +1681,6 @@ int adreno_set_unsecured_mode(struct adreno_device *adreno_dev,
 	if (!adreno_is_a5xx(adreno_dev) && !adreno_is_a6xx(adreno_dev))
 		return -EINVAL;
 
-	if (ADRENO_QUIRK(adreno_dev, ADRENO_QUIRK_CRITICAL_PACKETS) &&
-			adreno_is_a5xx(adreno_dev)) {
-		ret = a5xx_critical_packet_submit(adreno_dev, rb);
-		if (ret)
-			return ret;
-	}
-
 	/* GPU comes up in secured mode, make it unsecured by default */
 	if (adreno_dev->zap_handle_ptr)
 		ret = adreno_switch_to_unsecure_mode(adreno_dev, rb);
@@ -1774,6 +1759,14 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 
 	/* Clear any GPU faults that might have been left over */
 	adreno_clear_gpu_fault(adreno_dev);
+
+	/*
+	 * Keep high bus vote to reduce AHB latency
+	 * during FW loading and wakeup.
+	 */
+	if (device->pwrctrl.ahbpath_pcl)
+		msm_bus_scale_client_update_request(device->pwrctrl.ahbpath_pcl,
+			KGSL_AHB_PATH_HIGH);
 
 	/* Put the GPU in a responsive state */
 	status = kgsl_pwrctrl_change_state(device, KGSL_STATE_AWARE);
@@ -1994,9 +1987,6 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 	 */
 	adreno_llc_setup(device);
 
-	/* Re-initialize the coresight registers if applicable */
-	adreno_coresight_start(adreno_dev);
-
 	adreno_irqctrl(adreno_dev, 1);
 
 	adreno_perfcounter_start(adreno_dev);
@@ -2036,6 +2026,15 @@ static int _adreno_start(struct adreno_device *adreno_dev)
 			gmu_dev_ops->oob_clear(adreno_dev, oob_boot_slumber);
 	}
 
+	/*
+	 * Low vote is enough after wakeup completes, this will make
+	 * sure CPU to GPU AHB infrastructure clocks are running at-least
+	 * at minimum frequency.
+	 */
+	if (device->pwrctrl.ahbpath_pcl)
+		msm_bus_scale_client_update_request(device->pwrctrl.ahbpath_pcl,
+			KGSL_AHB_PATH_LOW);
+
 	return 0;
 
 error_oob_clear:
@@ -2058,6 +2057,9 @@ error_pwr_off:
 		pm_qos_update_request(&device->pwrctrl.pm_qos_req_dma,
 				pmqos_active_vote);
 
+	if (device->pwrctrl.ahbpath_pcl)
+		msm_bus_scale_client_update_request(device->pwrctrl.ahbpath_pcl,
+			KGSL_AHB_PATH_OFF);
 	return status;
 }
 
@@ -2125,9 +2127,6 @@ static int adreno_stop(struct kgsl_device *device)
 	adreno_llc_deactivate_slice(adreno_dev->gpu_llc_slice);
 	adreno_llc_deactivate_slice(adreno_dev->gpuhtw_llc_slice);
 
-	/* Save active coresight registers if applicable */
-	adreno_coresight_stop(adreno_dev);
-
 	/* Save physical performance counter values before GPU power down*/
 	adreno_perfcounter_save(adreno_dev);
 
@@ -2176,6 +2175,10 @@ static int adreno_stop(struct kgsl_device *device)
 	 * destroy any pending contexts and their pagetables
 	 */
 	adreno_set_active_ctxs_null(adreno_dev);
+
+	if (device->pwrctrl.ahbpath_pcl)
+		msm_bus_scale_client_update_request(device->pwrctrl.ahbpath_pcl,
+			KGSL_AHB_PATH_OFF);
 
 	clear_bit(ADRENO_DEVICE_STARTED, &adreno_dev->priv);
 
@@ -2936,9 +2939,6 @@ int adreno_soft_reset(struct kgsl_device *device)
 
 	/* Reinitialize the GPU */
 	gpudev->start(adreno_dev);
-
-	/* Re-initialize the coresight registers if applicable */
-	adreno_coresight_start(adreno_dev);
 
 	/* Enable IRQ */
 	adreno_irqctrl(adreno_dev, 1);
@@ -3888,13 +3888,7 @@ static void adreno_regulator_disable_poll(struct kgsl_device *device)
 static void adreno_gpu_model(struct kgsl_device *device, char *str,
 				size_t bufsz)
 {
-	struct adreno_device *adreno_dev = ADRENO_DEVICE(device);
-
-	snprintf(str, bufsz, "Adreno%d%d%dv%d",
-			ADRENO_CHIPID_CORE(adreno_dev->chipid),
-			 ADRENO_CHIPID_MAJOR(adreno_dev->chipid),
-			 ADRENO_CHIPID_MINOR(adreno_dev->chipid),
-			 ADRENO_CHIPID_PATCH(adreno_dev->chipid) + 1);
+	snprintf(str, bufsz, "Adreno618v1");
 }
 
 static int adreno_suspend_device(struct kgsl_device *device,
