@@ -160,8 +160,10 @@ static struct sg_table *dup_sg_table(struct sg_table *table)
 	new_sg = new_table->sgl;
 	if (new_table->nents <= SG_MAX_SINGLE_ALLOC) {
 		memcpy(new_sg, table->sgl, new_table->nents * sizeof(*new_sg));
-		sg_dma_address(new_sg) = 0;
-		sg_dma_len(new_sg) = 0;
+		for (i = 0; i < new_table->nents; i++) {
+			sg_dma_address(&new_sg[i]) = 0;
+			sg_dma_len(&new_sg[i]) = 0;
+		}
 	} else {
 		for_each_sg(table->sgl, sg, table->nents, i) {
 			*new_sg = *sg;
@@ -327,12 +329,13 @@ static void ion_vm_open(struct vm_area_struct *vma)
 static void ion_vm_close(struct vm_area_struct *vma)
 {
 	struct ion_buffer *buffer = vma->vm_private_data;
-	struct ion_vma_list *vma_list;
+	struct ion_vma_list *vma_list = NULL, *tmp;
 
 	mutex_lock(&buffer->vma_lock);
-	list_for_each_entry(vma_list, &buffer->vmas, list) {
-		if (vma_list->vma == vma) {
-			list_del(&vma_list->list);
+	list_for_each_entry(tmp, &buffer->vmas, list) {
+		if (tmp->vma == vma) {
+			list_del(&tmp->list);
+			vma_list = tmp;
 			break;
 		}
 	}
@@ -619,7 +622,7 @@ static int ion_dma_buf_begin_cpu_access_partial(struct dma_buf *dmabuf,
 		if (!a->dma_mapped)
 			continue;
 
-		ret = ion_sgl_sync_range(a->dev, a->table->sgl, a->table->nents,
+		tmp = ion_sgl_sync_range(a->dev, a->table->sgl, a->table->nents,
 					 offset, len, dir, true);
 
 		if (tmp)
@@ -653,7 +656,7 @@ static int ion_dma_buf_end_cpu_access_partial(struct dma_buf *dmabuf,
 		if (!a->dma_mapped)
 			continue;
 
-		ret = ion_sgl_sync_range(a->dev, a->table->sgl, a->table->nents,
+		tmp = ion_sgl_sync_range(a->dev, a->table->sgl, a->table->nents,
 					 offset, len, direction, false);
 
 		if (tmp)

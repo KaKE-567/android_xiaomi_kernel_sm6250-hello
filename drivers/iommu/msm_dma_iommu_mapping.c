@@ -94,7 +94,7 @@ int msm_dma_map_sg_attrs(struct device *dev, struct scatterlist *sg, int nents,
 			 unsigned long attrs)
 {
 	static const gfp_t gfp_flags_nofail = GFP_KERNEL | __GFP_NOFAIL;
-	int not_lazy = attrs & DMA_ATTR_NO_DELAYED_UNMAP;
+	bool not_lazy = !!(attrs & DMA_ATTR_NO_DELAYED_UNMAP);
 	struct msm_iommu_data *data = dma_buf->priv;
 	struct msm_iommu_meta *meta;
 	struct msm_iommu_map *map;
@@ -128,6 +128,8 @@ int msm_dma_map_sg_attrs(struct device *dev, struct scatterlist *sg, int nents,
 
 		if (is_device_dma_coherent(dev))
 			dmb(ish);
+
+		ret = nents;
 	} else {
 		ret = dma_map_sg_attrs(dev, sg, nents, dir, attrs);
 		if (ret) {
@@ -158,7 +160,7 @@ int msm_dma_map_sg_attrs(struct device *dev, struct scatterlist *sg, int nents,
 	up_read(&unmap_all_rwsem);
 	mutex_unlock(&data->lock);
 
-	return nents;
+	return ret;
 }
 
 void msm_dma_unmap_sg_attrs(struct device *dev, struct scatterlist *sg,
